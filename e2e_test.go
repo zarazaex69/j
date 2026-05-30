@@ -390,11 +390,11 @@ func testFullFlow(t *testing.T, host string) {
 	}
 	ch1, ch2 := make(chan result, 1), make(chan result, 1)
 	go func() {
-		s, e := j.Join(ctx, j.Config{Host: host, Room: room, Nick: "t1", Debug: debug})
+		s, e := j.Join(ctx, j.Config{Host: host, Room: room, Nick: "t1", Debug: debug, Insecure: true})
 		ch1 <- result{s, e}
 	}()
 	go func() {
-		s, e := j.Join(ctx, j.Config{Host: host, Room: room, Nick: "t2", Debug: debug})
+		s, e := j.Join(ctx, j.Config{Host: host, Room: room, Nick: "t2", Debug: debug, Insecure: true})
 		ch2 <- result{s, e}
 	}()
 
