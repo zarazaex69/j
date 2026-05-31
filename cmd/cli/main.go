@@ -435,6 +435,9 @@ func acceptOnce(ctx context.Context, sess *j.Session, sendVideo bool) error {
 	case <-done:
 	case <-ctx.Done():
 	}
+	// Close PC immediately to stop pion's internal RTCP sender goroutine
+	// before it writes to the already-closed DTLS pipe.
+	_ = pc.Close()
 	_ = neg.Terminate("success")
 	return nil
 }
@@ -675,30 +678,53 @@ func readLines(ctx context.Context) <-chan string {
 // otherwise falls back to SCTP datachannel via a new PeerConnection.
 func openBridgeAuto(ctx context.Context, sess *j.Session) error {
 	if sess.ColibriWS != "" {
-		if err := sess.OpenBridge(ctx); err != nil {
-			return err
+		if err := sess.OpenBridge(ctx); err == nil {
+			fmt.Fprintln(os.Stderr, "bridge connected (colibri-ws)")
+			return nil
+		} else {
+			fmt.Fprintf(os.Stderr, "colibri-ws failed (%v), falling back to SCTP...\n", err)
 		}
-		fmt.Fprintln(os.Stderr, "bridge connected (colibri-ws)")
-		return nil
+	} else {
+		fmt.Fprintln(os.Stderr, "no colibri-ws, using SCTP datachannel...")
 	}
-	fmt.Fprintln(os.Stderr, "no colibri-ws, using SCTP datachannel...")
-	pc, err := webrtc.NewPeerConnection(sess.IceConfig())
+	return openBridgeSCTP(ctx, sess)
+}
+
+func openBridgeSCTP(ctx context.Context, sess *j.Session) error {
+	cfg := sess.IceConfig()
+	pc, err := webrtc.NewPeerConnection(cfg)
 	if err != nil {
 		return fmt.Errorf("new pc: %w", err)
 	}
-	// 1. Create DC before Accept so it's in the SDP answer
 	if err := sess.PrepareBridgeSCTP(pc); err != nil {
 		_ = pc.Close()
 		return fmt.Errorf("prepare sctp: %w", err)
 	}
-	// 2. Accept sends session-accept with DC in SDP, starts ICE
 	neg := sess.Negotiator()
 	neg.PC = pc
 	if err := neg.Accept(ctx); err != nil {
 		_ = pc.Close()
-		return fmt.Errorf("accept: %w", err)
+		if peer.IsPlanBError(err) {
+			fmt.Fprintln(os.Stderr, "detected Plan B offer, recreating PC with PlanB semantics...")
+			cfg.SDPSemantics = webrtc.SDPSemanticsPlanB
+			pc, err = webrtc.NewPeerConnection(cfg)
+			if err != nil {
+				return fmt.Errorf("new pc (planb): %w", err)
+			}
+			if err := sess.PrepareBridgeSCTP(pc); err != nil {
+				_ = pc.Close()
+				return fmt.Errorf("prepare sctp (planb): %w", err)
+			}
+			neg = sess.Negotiator()
+			neg.PC = pc
+			if err := neg.Accept(ctx); err != nil {
+				_ = pc.Close()
+				return fmt.Errorf("accept (planb): %w", err)
+			}
+		} else {
+			return fmt.Errorf("accept: %w", err)
+		}
 	}
-	// 3. Wait for DC to open (after ICE/DTLS completes)
 	if err := sess.WaitBridgeSCTP(ctx); err != nil {
 		_ = pc.Close()
 		return fmt.Errorf("wait sctp: %w", err)
