@@ -511,6 +511,12 @@ func JoinMUC(ctx context.Context, cfg Config) (*Session, error) {
 	}
 	serverAuth := convertFocusInfo(conn.FocusInfo())
 
+	services, err := conn.DiscoverServices(ctx)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("discover services: %w", err)
+	}
+
 	if err := conn.JoinMUC(ctx, cfg.Room, cfg.Nick); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("join muc: %w", err)
@@ -519,6 +525,7 @@ func JoinMUC(ctx context.Context, cfg Config) (*Session, error) {
 	return &Session{
 		JID:        conn.JID(),
 		RoomJID:    fmt.Sprintf("%s@%s", cfg.Room, conn.MUCDomain()),
+		ICEServers: convertICE(services),
 		ServerAuth: serverAuth,
 		Conn:       conn,
 		room:       cfg.Room,
