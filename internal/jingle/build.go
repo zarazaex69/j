@@ -249,6 +249,22 @@ func writeRTPHdrExts(b *strings.Builder, lines []string) {
 	}
 }
 
+// parseSSRCGroups returns the a=ssrc-group entries as [semantics, ssrc...] slices.
+func parseSSRCGroups(lines []string) [][]string {
+	var groups [][]string
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "a=ssrc-group:") {
+			continue
+		}
+		fs := strings.Fields(strings.TrimPrefix(line, "a=ssrc-group:"))
+		if len(fs) < 2 {
+			continue
+		}
+		groups = append(groups, fs)
+	}
+	return groups
+}
+
 func writeSources(b *strings.Builder, lines []string) {
 	// Group ssrc lines by SSRC value
 	type src struct {
@@ -280,6 +296,31 @@ func writeSources(b *strings.Builder, lines []string) {
 		}
 		sources[ssrc].params = append(sources[ssrc].params, [2]string{name, value})
 	}
+
+	// Synthesize sources for ssrcs that appear only in an ssrc-group (e.g. RTX in
+	// FID). Jicofo rejects session-accept if a group references an unsignaled
+	// source: "An SSRC group contains an SSRC, which hasn't been signaled as a
+	// source". Inherit cname/msid/mslabel/label from a declared sibling.
+	for _, g := range parseSSRCGroups(lines) {
+		var donor string
+		for _, ssrc := range g[1:] {
+			if _, ok := sources[ssrc]; ok {
+				donor = ssrc
+				break
+			}
+		}
+		if donor == "" {
+			continue
+		}
+		for _, ssrc := range g[1:] {
+			if _, ok := sources[ssrc]; ok {
+				continue
+			}
+			sources[ssrc] = &src{params: sources[donor].params}
+			order = append(order, ssrc)
+		}
+	}
+
 	for _, ssrc := range order {
 		fmt.Fprintf(b, `<source xmlns="urn:xmpp:jingle:apps:rtp:ssma:0" ssrc="%s">`, ssrc)
 		for _, p := range sources[ssrc].params {
@@ -294,17 +335,9 @@ func writeSources(b *strings.Builder, lines []string) {
 }
 
 func writeSSRCGroups(b *strings.Builder, lines []string) {
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "a=ssrc-group:") {
-			continue
-		}
-		rest := strings.TrimPrefix(line, "a=ssrc-group:")
-		fs := strings.Fields(rest)
-		if len(fs) < 2 {
-			continue
-		}
-		fmt.Fprintf(b, `<ssrc-group xmlns="urn:xmpp:jingle:apps:rtp:ssma:0" semantics="%s">`, fs[0])
-		for _, ssrc := range fs[1:] {
+	for _, g := range parseSSRCGroups(lines) {
+		fmt.Fprintf(b, `<ssrc-group xmlns="urn:xmpp:jingle:apps:rtp:ssma:0" semantics="%s">`, g[0])
+		for _, ssrc := range g[1:] {
 			fmt.Fprintf(b, `<source ssrc="%s"/>`, ssrc)
 		}
 		b.WriteString("</ssrc-group>")
