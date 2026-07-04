@@ -640,7 +640,8 @@ func convertICE(services []xmpp.Service) []ICEServer {
 // for stuns/turns), IPv6 hosts are bracketed via net.JoinHostPort, and a
 // missing or unknown transport omits the query so pion applies the scheme
 // default (udp for turn, tcp for turns). Entries that cannot be turned into
-// a valid URI (no host, unusable port, host with URL metacharacters) are
+// a valid URI (no host, unusable port, host with URL metacharacters,
+// colon-containing host that is not an IPv6 literal) are
 // skipped with ok=false so one bad advertisement doesn't poison the rest.
 // Credential requirements for turn/turns are enforced by convertICE, not
 // here; this function only renders the URL.
@@ -663,6 +664,12 @@ func iceServiceURL(s xmpp.Service) (string, bool) {
 		host = host[1 : len(host)-1]
 	}
 	if host == "" || strings.ContainsAny(host, "[]?#/@% \t\r\n") {
+		return "", false
+	}
+	// net.JoinHostPort brackets any host containing a colon, so a non-IPv6
+	// host like "evil:host" would render as "stun:[evil:host]:3478", which
+	// pion rejects. Only valid IPv6 literals may contain colons.
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
 		return "", false
 	}
 

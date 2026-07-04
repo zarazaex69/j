@@ -128,6 +128,26 @@ func TestConvertICEURLFormation(t *testing.T) {
 			svc:  xmpp.Service{Type: "stun", Host: "stun.example.com?x", Port: "3478"},
 			want: "",
 		},
+		{
+			name: "colon-containing non-ipv6 host skipped",
+			svc:  xmpp.Service{Type: "stun", Host: "evil:host", Port: "3478"},
+			want: "",
+		},
+		{
+			name: "host with embedded port skipped",
+			svc:  xmpp.Service{Type: "stun", Host: "stun.example.com:3478", Port: "3478"},
+			want: "",
+		},
+		{
+			name: "bracketed non-ipv6 host skipped",
+			svc:  xmpp.Service{Type: "stun", Host: "[evil:host]", Port: "3478"},
+			want: "",
+		},
+		{
+			name: "malformed ipv6 literal skipped",
+			svc:  xmpp.Service{Type: "stun", Host: "2001:db8::zz", Port: "3478"},
+			want: "",
+		},
 
 		// TURN/TURNS credential gating: pion rejects any TURN URL whose
 		// server has an empty username or nil credential inside
