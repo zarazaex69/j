@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -605,16 +607,20 @@ func convertFocusInfo(info xmpp.FocusInfo) ServerAuthInfo {
 func convertICE(services []xmpp.Service) []ICEServer {
 	var servers []ICEServer
 	for _, s := range services {
-		var url string
-		switch s.Type {
-		case "stun":
-			url = fmt.Sprintf("stun:%s:%s", s.Host, s.Port)
-		case "turn":
-			url = fmt.Sprintf("turn:%s:%s?transport=%s", s.Host, s.Port, s.Transport)
-		case "turns":
-			url = fmt.Sprintf("turns:%s:%s?transport=%s", s.Host, s.Port, s.Transport)
-		default:
+		url, ok := iceServiceURL(s)
+		if !ok {
 			continue
+		}
+		// pion validates TURN/TURNS servers inside NewPeerConnection and
+		// fails the whole configuration ("no turn server credentials") when
+		// the username or password is missing, so a single unauthenticated
+		// TURN advertisement would poison every other server. Skip turn/turns
+		// services without complete credentials; stun/stuns need none and are
+		// unaffected.
+		if strings.HasPrefix(url, "turn:") || strings.HasPrefix(url, "turns:") {
+			if s.Username == "" || s.Password == "" {
+				continue
+			}
 		}
 		servers = append(servers, ICEServer{
 			URLs:       []string{url},
@@ -623,4 +629,57 @@ func convertICE(services []xmpp.Service) []ICEServer {
 		})
 	}
 	return servers
+}
+
+// iceServiceURL renders one XEP-0215 service as an RFC 7064/7065 STUN/TURN
+// URI. Servers may advertise services with a missing port or transport;
+// naive formatting then yields URLs like "stun:host:" or
+// "turn:host:?transport=udp", which pion rejects inside
+// NewPeerConnection ("invalid port") and the whole ICE config is lost.
+// Missing ports fall back to the scheme defaults (3478 for stun/turn, 5349
+// for stuns/turns), IPv6 hosts are bracketed via net.JoinHostPort, and a
+// missing or unknown transport omits the query so pion applies the scheme
+// default (udp for turn, tcp for turns). Entries that cannot be turned into
+// a valid URI (no host, unusable port, host with URL metacharacters) are
+// skipped with ok=false so one bad advertisement doesn't poison the rest.
+// Credential requirements for turn/turns are enforced by convertICE, not
+// here; this function only renders the URL.
+func iceServiceURL(s xmpp.Service) (string, bool) {
+	scheme := strings.ToLower(strings.TrimSpace(s.Type))
+	var defaultPort string
+	switch scheme {
+	case "stun", "turn":
+		defaultPort = "3478"
+	case "stuns", "turns":
+		defaultPort = "5349"
+	default:
+		return "", false
+	}
+
+	host := strings.TrimSpace(s.Host)
+	// Unwrap a pre-bracketed IPv6 literal; net.JoinHostPort re-brackets any
+	// host containing a colon and would otherwise double the brackets.
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if host == "" || strings.ContainsAny(host, "[]?#/@% \t\r\n") {
+		return "", false
+	}
+
+	port := strings.TrimSpace(s.Port)
+	if port == "" {
+		port = defaultPort
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", false
+	}
+
+	url := scheme + ":" + net.JoinHostPort(host, port)
+	if scheme == "turn" || scheme == "turns" {
+		switch transport := strings.ToLower(strings.TrimSpace(s.Transport)); transport {
+		case "udp", "tcp":
+			url += "?transport=" + transport
+		}
+	}
+	return url, true
 }
