@@ -46,28 +46,28 @@ func (t *wsTransport) Close() error {
 }
 
 type Conn struct {
-	tr        transport
-	host      string
-	room      string
-	mucDomain string // e.g. "muc.meet1.arbitr.ru" or "conference.meet1.arbitr.ru"
+	tr         transport
+	host       string
+	room       string
+	mucDomain  string // e.g. "muc.meet1.arbitr.ru" or "conference.meet1.arbitr.ru"
 	xmppDomain string // XMPP virtualhost — usually equals host, but docker-jitsi-meet uses "meet.jitsi"
-	jid       string
-	nick      string
-	debug     bool
-	anonymous bool
-	bosh      bool // true when using BOSH transport (no stream management)
-	focusInfo FocusInfo
-	mu        sync.Mutex
-	ackH      atomic.Int64
-	idSeq     atomic.Int64
-	lastJngMu sync.Mutex
-	lastJng   string
-	occMu     sync.Mutex
-	occupants map[string]struct{} // MUC nick → present (excluding self and "focus")
-	stanzas   chan string
-	jingles   chan string
-	closed    chan struct{}
-	closeOnce sync.Once
+	jid        string
+	nick       string
+	debug      bool
+	anonymous  bool
+	bosh       bool // true when using BOSH transport (no stream management)
+	focusInfo  FocusInfo
+	mu         sync.Mutex
+	ackH       atomic.Int64
+	idSeq      atomic.Int64
+	lastJngMu  sync.Mutex
+	lastJng    string
+	occMu      sync.Mutex
+	occupants  map[string]struct{} // MUC nick → present (excluding self and "focus")
+	stanzas    chan string
+	jingles    chan string
+	closed     chan struct{}
+	closeOnce  sync.Once
 
 	// waitMu protects the per-stanza waiter maps below.
 	waitMu sync.Mutex
@@ -128,13 +128,11 @@ var jitsiMeetFeatures = []string{
 
 var jitsiCapsVersion = calculateJitsiCapsVersion()
 
-func Dial(ctx context.Context, host, room string, debug, insecure bool) (*Conn, error) {
-	var httpClient *http.Client
-	if insecure {
-		httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
-	}
-
-	cfg := fetchConfig(host, insecure)
+func Dial(
+	ctx context.Context, host, room string, debug, insecure bool, httpClient *http.Client,
+) (*Conn, *http.Client, error) {
+	httpClient = selectHTTPClient(httpClient, insecure)
+	cfg := fetchConfig(ctx, host, httpClient)
 
 	wsURL := cfg.websocket
 	if wsURL == "" {
@@ -166,9 +164,10 @@ func Dial(ctx context.Context, host, room string, debug, insecure bool) (*Conn, 
 	if wsErr != nil {
 		// BOSH fallback: if WebSocket dial failed and we have a BOSH URL, try BOSH.
 		if cfg.bosh != "" {
-			return dialBOSH(ctx, host, room, debug, insecure, cfg)
+			conn, err := dialBOSH(ctx, host, room, debug, cfg, httpClient)
+			return conn, httpClient, err
 		}
-		return nil, fmt.Errorf("failed to WebSocket dial: %w", wsErr)
+		return nil, httpClient, fmt.Errorf("failed to WebSocket dial: %w", wsErr)
 	}
 	ws.SetReadLimit(1 << 20)
 
@@ -188,12 +187,22 @@ func Dial(ctx context.Context, host, room string, debug, insecure bool) (*Conn, 
 
 	if err := c.auth(ctx); err != nil {
 		_ = ws.Close(websocket.StatusInternalError, "")
-		return nil, err
+		return nil, httpClient, err
 	}
 
 	go c.readLoop()
 	go c.keepaliveLoop()
-	return c, nil
+	return c, httpClient, nil
+}
+
+func selectHTTPClient(client *http.Client, insecure bool) *http.Client {
+	if client != nil {
+		return client
+	}
+	if insecure {
+		return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	}
+	return http.DefaultClient
 }
 
 type jitsiConfig struct {
@@ -205,16 +214,16 @@ type jitsiConfig struct {
 
 // fetchConfig downloads /config.js from the host and extracts MUC domain,
 // XMPP domain, WebSocket URL, and BOSH URL.
-func fetchConfig(host string, insecure bool) jitsiConfig {
+func fetchConfig(ctx context.Context, host string, client *http.Client) jitsiConfig {
 	cfg := jitsiConfig{
 		mucDomain:  "conference." + host,
 		xmppDomain: host,
 	}
-	client := http.DefaultClient
-	if insecure {
-		client = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/config.js", nil)
+	if err != nil {
+		return cfg
 	}
-	resp, err := client.Get("https://" + host + "/config.js")
+	resp, err := client.Do(req)
 	if err != nil {
 		return cfg
 	}
@@ -328,7 +337,7 @@ func joinStringLiterals(expr string) string {
 	return out.String()
 }
 
-func (c *Conn) JID() string  { return c.jid }
+func (c *Conn) JID() string       { return c.jid }
 func (c *Conn) Nick() string      { return c.nick }
 func (c *Conn) Host() string      { return c.host }
 func (c *Conn) Room() string      { return c.room }
@@ -1170,11 +1179,7 @@ type boshTransport struct {
 	once   sync.Once
 }
 
-func newBOSHTransport(boshURL string, insecure bool) *boshTransport {
-	client := http.DefaultClient
-	if insecure {
-		client = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
-	}
+func newBOSHTransport(boshURL string, client *http.Client) *boshTransport {
 	bt := &boshTransport{
 		url:    boshURL,
 		client: client,
@@ -1332,8 +1337,10 @@ func (bt *boshTransport) Close() error {
 }
 
 // dialBOSH creates a Conn using BOSH transport.
-func dialBOSH(ctx context.Context, host, room string, debug, insecure bool, cfg jitsiConfig) (*Conn, error) {
-	bt := newBOSHTransport(cfg.bosh, insecure)
+func dialBOSH(
+	ctx context.Context, host, room string, debug bool, cfg jitsiConfig, client *http.Client,
+) (*Conn, error) {
+	bt := newBOSHTransport(cfg.bosh, client)
 	if err := bt.init(cfg.xmppDomain); err != nil {
 		return nil, err
 	}

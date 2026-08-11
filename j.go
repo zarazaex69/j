@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,9 @@ type Config struct {
 	Nick     string // display name
 	Debug    bool   // verbose XMPP logging
 	Insecure bool   // skip TLS certificate verification
+	// HTTPClient is used for config discovery, XMPP/BOSH, and Colibri WebSockets.
+	// When set, it takes precedence over Insecure.
+	HTTPClient *http.Client
 }
 
 type ICEServer struct {
@@ -127,13 +131,14 @@ type Session struct {
 	ServerAuth  ServerAuthInfo
 	Conn        *xmpp.Conn
 
-	bridge    colibri.Bridge
-	bridgeMu  sync.Mutex
-	sctpDC    *webrtc.DataChannel
-	sctpReady chan struct{}
-	room      string
-	jingleSID string
-	initiator string
+	bridge     colibri.Bridge
+	bridgeMu   sync.Mutex
+	sctpDC     *webrtc.DataChannel
+	sctpReady  chan struct{}
+	room       string
+	jingleSID  string
+	initiator  string
+	httpClient *http.Client
 }
 
 // BridgeMessage is the type returned by the Bridge() channel — see internal/colibri.Message.
@@ -164,7 +169,7 @@ func (s *Session) OpenBridge(ctx context.Context) error {
 		return nil
 	}
 	if s.ColibriWS != "" {
-		br, err := colibri.Dial(ctx, s.ColibriWS)
+		br, err := colibri.Dial(ctx, s.ColibriWS, s.httpClient)
 		if err != nil {
 			return err
 		}
@@ -502,7 +507,7 @@ func JoinMUC(ctx context.Context, cfg Config) (*Session, error) {
 		cfg.Nick = "j-client"
 	}
 
-	conn, err := xmpp.Dial(ctx, cfg.Host, cfg.Room, cfg.Debug, cfg.Insecure)
+	conn, httpClient, err := xmpp.Dial(ctx, cfg.Host, cfg.Room, cfg.Debug, cfg.Insecure, cfg.HTTPClient)
 	if err != nil {
 		return nil, fmt.Errorf("xmpp dial: %w", err)
 	}
@@ -531,6 +536,7 @@ func JoinMUC(ctx context.Context, cfg Config) (*Session, error) {
 		ServerAuth: serverAuth,
 		Conn:       conn,
 		room:       cfg.Room,
+		httpClient: httpClient,
 	}, nil
 }
 
@@ -542,7 +548,7 @@ func Join(ctx context.Context, cfg Config) (*Session, error) {
 		cfg.Nick = "j-client"
 	}
 
-	conn, err := xmpp.Dial(ctx, cfg.Host, cfg.Room, cfg.Debug, cfg.Insecure)
+	conn, httpClient, err := xmpp.Dial(ctx, cfg.Host, cfg.Room, cfg.Debug, cfg.Insecure, cfg.HTTPClient)
 	if err != nil {
 		return nil, fmt.Errorf("xmpp dial: %w", err)
 	}
@@ -587,6 +593,7 @@ func Join(ctx context.Context, cfg Config) (*Session, error) {
 		room:        cfg.Room,
 		jingleSID:   parsed.SID,
 		initiator:   parsed.Initiator,
+		httpClient:  httpClient,
 	}
 
 	return sess, nil

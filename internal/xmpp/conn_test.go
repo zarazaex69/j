@@ -3,12 +3,18 @@ package xmpp
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // mockTransport is a fake transport for testing.
 type mockTransport struct {
@@ -84,6 +90,37 @@ func newTestConn(mt *mockTransport) *Conn {
 }
 
 // --- Config parsing tests ---
+
+func TestFetchConfigUsesInjectedHTTPClient(t *testing.T) {
+	client := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://custom.test/config.js" {
+			t.Fatalf("request URL = %q", req.URL)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`config.hosts.domain = 'xmpp.test';
+config.hosts.muc = 'conference.test';
+config.websocket = 'wss://ws.test/xmpp-websocket';
+config.bosh = 'https://bosh.test/http-bind';`)),
+		}, nil
+	})}
+
+	cfg := fetchConfig(context.Background(), "custom.test", client)
+	if cfg.xmppDomain != "xmpp.test" || cfg.mucDomain != "conference.test" ||
+		cfg.websocket != "wss://ws.test/xmpp-websocket" || cfg.bosh != "https://bosh.test/http-bind" {
+		t.Fatalf("fetchConfig() = %#v", cfg)
+	}
+}
+
+func TestSelectHTTPClientPrefersInjectedClient(t *testing.T) {
+	client := &http.Client{}
+	if got := selectHTTPClient(client, true); got != client {
+		t.Fatal("selectHTTPClient did not prefer the injected client")
+	}
+	if got := selectHTTPClient(nil, false); got != http.DefaultClient {
+		t.Fatal("selectHTTPClient did not use the default client")
+	}
+}
 
 func TestExtractStringField(t *testing.T) {
 	tests := []struct {

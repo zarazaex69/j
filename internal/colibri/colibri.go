@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 
@@ -49,8 +50,8 @@ type Message struct {
 }
 
 // Dial opens a colibri-ws WebSocket and performs the optional ClientHello handshake.
-func Dial(ctx context.Context, url string) (*Conn, error) {
-	ws, _, err := websocket.Dial(ctx, url, nil)
+func Dial(ctx context.Context, url string, client *http.Client) (*Conn, error) {
+	ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPClient: client})
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
